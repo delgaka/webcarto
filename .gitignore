@@ -1,0 +1,28 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+
+# OS/IDE cruft
+.DS_Store
+*.swp
+
+# Environment configuration
+.env
+
+# Tool caches
+src/webcarto/.tldcache/
+
+# Generated reports and artifacts
+out/
+*.log
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+plan/

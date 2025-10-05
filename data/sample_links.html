@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sample Links</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    .quote { padding: 1rem; border-left: 4px solid #888; margin: 1rem 0; background: #f7f7f7; }
+    .tags { margin-top: .5rem; }
+    .tag { display: inline-block; padding: .2rem .4rem; background: #e0ecff; border-radius: 3px; margin-right: .3rem; font-size: .85rem; }
+  </style>
+  <!-- Amostra mínima para testar extração de links sem rede -->
+</head>
+<body>
+  <h1>Sample Links</h1>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/about">About</a>
+    <a href="/page/2/">Next (com barra final)</a>
+    <a href="/page/3">Next (sem barra final)</a>
+    <a href="/search?q=test">Search (query)</a>
+    <a href="https://quotes.toscrape.com/tag/life/">Life tag (absoluto interno)</a>
+    <a href="https://sub.quotes.toscrape.com/path">Subdomínio interno</a>
+    <a href="https://example.org/">Externo</a>
+    <a href="#section">Âncora local (ignorar)</a>
+    <a href="mailto:support@example.org">mailto (ignorar)</a>
+    <a href="tel:+5511999999999">tel (ignorar)</a>
+    <a href="javascript:void(0)">javascript (ignorar)</a>
+  </nav>
+
+  <!-- Assets e formulário para teste da coleta estendida -->
+  <section>
+    <img src="/static/img/logo.png" alt="logo" />
+    <script src="https://cdn.example.com/js/app.js"></script>
+    <link rel="stylesheet" href="/static/css/site.css" />
+    <form action="https://example.org/submit" method="post">
+      <input type="text" name="q" />
+      <button type="submit">Enviar</button>
+    </form>
+  </section>
+
+  <div class="quote">
+    <span class="text">“The world as we have created it is a process of our thinking. It cannot be changed without changing our thinking.”</span>
+    <span>by <small class="author">Albert Einstein</small></span>
+    <div class="tags">
+      <a class="tag" href="#">change</a>
+      <a class="tag" href="#">deep-thoughts</a>
+      <a class="tag" href="#">thinking</a>
+      <a class="tag" href="#">world</a>
+    </div>
+  </div>
+
+  <div class="quote">
+    <span class="text">“It is our choices, Harry, that show what we truly are, far more than our abilities.”</span>
+    <span>by <small class="author">J.K. Rowling</small></span>
+    <div class="tags">
+      <a class="tag" href="#">abilities</a>
+      <a class="tag" href="#">choices</a>
+    </div>
+  </div>
+
+  <div class="quote">
+    <span class="text">“There are only two ways to live your life. One is as though nothing is a miracle. The other is as though everything is a miracle.”</span>
+    <span>by <small class="author">Albert Einstein</small></span>
+    <div class="tags">
+      <a class="tag" href="#">inspirational</a>
+      <a class="tag" href="#">life</a>
+      <a class="tag" href="#">live</a>
+      <a class="tag" href="#">miracle</a>
+      <a class="tag" href="#">miracles</a>
+    </div>
+  </div>
+
+</body>
+</html>

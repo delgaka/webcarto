@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webcarto"
+version = "0.1.0"
+description = "WebCarto: mapeador de URLs com crawl BFS, agrupamentos e métricas"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Proprietary"}
+authors = [{ name = "WebCarto" }]
+dependencies = [
+  "requests>=2.31.0",
+  "beautifulsoup4>=4.12.2",
+  "lxml>=4.9.3",
+  "tldextract>=5.1.0",
+]
+
+[project.scripts]
+webcarto = "webcarto:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
