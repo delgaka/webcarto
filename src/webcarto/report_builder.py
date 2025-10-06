@@ -65,6 +65,8 @@ FRIENDLY_LABELS = {
     "privacy_pages_with_fingerprinting": "Fingerprinting",
     "privacy_pages_with_facebook_pixel": "Facebook Pixel",
     "privacy_pages_with_ga_remarketing": "GA remarketing",
+    "privacy_cookies_total": "Cookies analisados",
+    "privacy_cookies_third_party_total": "Cookies de terceiros (total)",
 }
 
 
@@ -94,6 +96,8 @@ METRIC_ICONS = {
     "privacy_pages_with_fingerprinting": "🆔",
     "privacy_pages_with_facebook_pixel": "📘",
     "privacy_pages_with_ga_remarketing": "📈",
+    "privacy_cookies_total": "🍪",
+    "privacy_cookies_third_party_total": "🍪",
 }
 
 
@@ -231,7 +235,6 @@ ISSUE_LABELS = {
     "no_consent_banner": "Sem banner de consentimento",
     "request_failed": "Falha no carregamento",
 }
-
 
 def _render_issue_badges(issues: Iterable[str]) -> str:
     mapped = [ISSUE_LABELS.get(issue, issue.replace("_", " ")) for issue in issues]
@@ -431,12 +434,19 @@ def render_report(
     privacy_items = privacy.get("items", []) if privacy else []
     privacy_metrics = privacy.get("metrics", {}) if privacy else {}
     privacy_rows_parts: List[str] = []
+    cookie_category_set: Dict[str, str] = {}
     for entry in privacy_items:
         cookies_html = _render_cookie_badges([c for c in entry.get("cookies", []) if c.get("third_party")])
         trackers_html = _render_tracker_badges(entry.get("trackers", []))
         issues_html = _render_issue_badges(entry.get("issues", []))
+        issue_slugs = []
+        for issue in entry.get("issues", []):
+            if isinstance(issue, str) and issue:
+                slug = _slugify(issue)
+                issue_slugs.append(slug)
+        issues_attr = " ".join(issue_slugs)
         privacy_rows_parts.append(
-            "<tr>"
+            f"<tr data-issues=\"{_escape(issues_attr)}\">"
             f"<td>{_escape(entry.get('page'))}</td>"
             f"<td>{_escape(entry.get('status'))}</td>"
             f"<td>{cookies_html}</td>"
@@ -446,7 +456,190 @@ def render_report(
         )
     privacy_rows = "".join(privacy_rows_parts) or "<tr><td colspan=\"5\" class=\"empty\">Nenhuma analise de privacidade.</td></tr>"
     privacy_metrics_html = _build_metric_list(privacy_metrics)
+    privacy_cookie_rows_parts: List[str] = []
+    cookie_issue_set: Dict[str, str] = {}
+    cookie_count = 0
+    keylogging_rows_parts: List[str] = []
+    storage_rows_parts: List[str] = []
+    keylogging_count = 0
+    storage_count = 0
+    privacy_page_summaries: List[Dict[str, Any]] = []
+    for entry in privacy_items:
+        cookies = entry.get("cookies") or []
+        page_label = entry.get("page")
+        status_code = entry.get("status")
+        trackers_entry = entry.get("trackers") or []
+        third_party_cookie_count = sum(1 for c in cookies if c.get("third_party"))
+        for cookie in cookies:
+            cookie_count += 1
+            name = cookie.get("name")
+            domain = cookie.get("domain")
+            category = cookie.get("category")
+            category_slug = _slugify(category) if category else "sem-categoria"
+            if category_slug not in cookie_category_set:
+                cookie_category_set[category_slug] = category or "Sem categoria"
+            is_third = bool(cookie.get("third_party"))
+            origin = "Terceiro" if is_third else "Próprio"
+            origin_slug = "third" if is_third else "first"
+            origin_class = "cookie-origin-third" if origin_slug == "third" else "cookie-origin-first"
+            cookie_issues = [
+                issue
+                for issue in (cookie.get("issues") or [])
+                if isinstance(issue, str) and issue
+            ]
+            for slug in cookie_issues:
+                label = ISSUE_LABELS.get(slug, slug.replace("_", " "))
+                cookie_issue_set.setdefault(slug, label)
+            issues_attr = " ".join(sorted(cookie_issues))
+            issues_html = _render_issue_badges(cookie_issues)
+            privacy_cookie_rows_parts.append(
+                f"<tr data-origin=\"{origin_slug}\" data-category=\"{_escape(category_slug)}\" data-issues=\"{_escape(issues_attr)}\">"
+                f"<td>{_escape(page_label)}</td>"
+                f"<td>{_escape(name)}</td>"
+                f"<td>{_escape(domain)}</td>"
+                f"<td>{_escape(category or '')}</td>"
+                f"<td>{issues_html}</td>"
+                f"<td><span class=\"{origin_class}\">{_escape(origin)}</span></td>"
+                "</tr>"
+            )
 
+        keylog_map: Dict[Tuple[str, str], int] = {}
+        for ev in entry.get("keylogging", []) or []:
+            ev_type = (ev.get("type") or "-").strip().lower()
+            selector = (ev.get("selector") or "-").strip()
+            key = (ev_type, selector)
+            keylog_map[key] = keylog_map.get(key, 0) + 1
+        for (ev_type, selector), count in sorted(keylog_map.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+            keylogging_count += count
+            keylogging_rows_parts.append(
+                "<tr>"
+                f"<td>{_escape(page_label)}</td>"
+                f"<td>{_escape(ev_type)}</td>"
+                f"<td>{_escape(selector)}</td>"
+                f"<td>{_escape(count)}x</td>"
+                "</tr>"
+            )
+
+        storage_map: Dict[Tuple[str, str], int] = {}
+        for log in entry.get("storage_tracking", []) or []:
+            storage_type = (log.get("storage") or "-").strip().lower()
+            key_name = (log.get("key") or "-").strip()
+            skey = (storage_type, key_name)
+            storage_map[skey] = storage_map.get(skey, 0) + 1
+        for (stype, key_name), count in sorted(storage_map.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+            storage_count += count
+            storage_rows_parts.append(
+                "<tr>"
+                f"<td>{_escape(page_label)}</td>"
+                f"<td>{_escape(stype)}</td>"
+                f"<td>{_escape(key_name)}</td>"
+                f"<td>{_escape(count)}x</td>"
+                "</tr>"
+            )
+
+        privacy_page_summaries.append(
+            {
+                "page": page_label,
+                "status": status_code,
+                "cookies_total": len(cookies),
+                "cookies_third": third_party_cookie_count,
+                "trackers_total": len(trackers_entry),
+                "keylog_unique": len(keylog_map),
+                "keylog_events": sum(keylog_map.values()),
+                "storage_unique": len(storage_map),
+                "storage_events": sum(storage_map.values()),
+                "issues": entry.get("issues") or [],
+                "session_replay": bool(entry.get("session_replay")),
+                "facebook_pixel": bool(entry.get("facebook_pixel")),
+                "ga_remarketing": bool(entry.get("ga_remarketing")),
+                "keylogging": bool(keylog_map),
+                "storage": bool(storage_map),
+            }
+        )
+
+    privacy_cookie_count = cookie_count
+    privacy_cookies_rows = "".join(privacy_cookie_rows_parts) or "<tr><td colspan=\"5\" class=\"empty\">Nenhum cookie capturado.</td></tr>"
+    if cookie_issue_set:
+        issue_buttons = ["<span class=\"filter-label\">Sinal detectado:</span>", "<button data-reason=\"all\" class=\"active\">Todos</button>"]
+        for slug, label in sorted(cookie_issue_set.items(), key=lambda kv: kv[1].lower()):
+            issue_buttons.append(f"<button data-reason=\"{slug}\">{_escape(label)}</button>")
+        cookie_issue_filter = "<div class=\"reason-filter chip-row\" id=\"cookie-issue-filter\">" + "".join(issue_buttons) + "</div>"
+    else:
+        cookie_issue_filter = ""
+
+    keylogging_table_rows = "".join(keylogging_rows_parts) or "<tr><td colspan=\"4\" class=\"empty\">Nenhum evento de teclado monitorado.</td></tr>"
+    storage_table_rows = "".join(storage_rows_parts) or "<tr><td colspan=\"4\" class=\"empty\">Nenhum registro de armazenamento detectado.</td></tr>"
+
+    privacy_page_cards_html = ""
+    if privacy_page_summaries:
+        profile_map: Dict[str, Dict[str, Any]] = {}
+        for summary in privacy_page_summaries:
+            issues_key = ",".join(sorted(summary.get("issues") or []))
+            profile_key = "|".join(
+                [
+                    issues_key,
+                    str(summary.get("keylogging")),
+                    str(summary.get("session_replay")),
+                    str(summary.get("storage")),
+                    str(summary.get("facebook_pixel")),
+                    str(summary.get("ga_remarketing")),
+                ]
+            )
+            bucket = profile_map.setdefault(
+                profile_key,
+                {
+                    "pages": [],
+                    "issues": summary.get("issues") or [],
+                    "keylogging": summary.get("keylogging"),
+                    "session_replay": summary.get("session_replay"),
+                    "storage": summary.get("storage"),
+                    "facebook_pixel": summary.get("facebook_pixel"),
+                    "ga_remarketing": summary.get("ga_remarketing"),
+                    "cookies_third": 0,
+                    "cookies_total": 0,
+                    "trackers_total": 0,
+                    "keylog_unique": 0,
+                    "keylog_events": 0,
+                    "storage_unique": 0,
+                    "storage_events": 0,
+                },
+            )
+            bucket["pages"].append(summary.get("page") or "-" )
+            bucket["cookies_third"] += summary.get("cookies_third", 0)
+            bucket["cookies_total"] += summary.get("cookies_total", 0)
+            bucket["trackers_total"] += summary.get("trackers_total", 0)
+            bucket["keylog_unique"] += summary.get("keylog_unique", 0)
+            bucket["keylog_events"] += summary.get("keylog_events", 0)
+            bucket["storage_unique"] += summary.get("storage_unique", 0)
+            bucket["storage_events"] += summary.get("storage_events", 0)
+
+        card_parts: List[str] = []
+        for bucket in profile_map.values():
+            pages = bucket["pages"]
+            chips = [
+                f"Páginas: {len(pages)}",
+                f"Cookies de terceiros (total): {bucket['cookies_third']}",
+                f"Cookies (total): {bucket['cookies_total']}",
+                f"Trackers (total): {bucket['trackers_total']}",
+                f"Keylogging: {'Sim' if bucket['keylogging'] else 'Não'} ({bucket['keylog_unique']} campos, {bucket['keylog_events']} eventos)",
+                f"Session replay: {'Sim' if bucket['session_replay'] else 'Não'}",
+                f"Armazenamento: {'Sim' if bucket['storage'] else 'Não'} ({bucket['storage_unique']} chaves, {bucket['storage_events']} gravações)",
+                f"Facebook Pixel: {'Sim' if bucket['facebook_pixel'] else 'Não'}",
+                f"GA remarketing: {'Sim' if bucket['ga_remarketing'] else 'Não'}",
+            ]
+            issues = [ISSUE_LABELS.get(issue, issue.replace("_", " ")) for issue in bucket.get("issues", [])]
+            if issues:
+                chips.append("Issues: " + ", ".join(issues))
+            chips_html = "".join(f"<span class=\"metric-chip\">{_escape(text)}</span>" for text in chips)
+            pages_html = "".join(f"<li>{_escape(page)}</li>" for page in pages)
+            card_parts.append(
+                "<div class=\"privacy-page-card\">"
+                f"<div class=\"privacy-page-card__header\">{len(pages)} página(s) com este perfil</div>"
+                f"<div class=\"metric-list\">{chips_html}</div>"
+                f"<ul class=\"privacy-page-card__pages\">{pages_html}</ul>"
+                "</div>"
+            )
+        privacy_page_cards_html = "<div class=\"privacy-page-cards\">" + "".join(card_parts) + "</div>"
     now_str = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
     html_doc = f"""<!DOCTYPE html>
@@ -576,6 +769,71 @@ def render_report(
       color: var(--fg);
       box-shadow: 0 4px 12px rgba(37,99,235,0.25);
     }}
+    .privacy-subnav {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin: 20px 0 12px;
+    }}
+    .privacy-subnav button {{
+      border: 1px solid rgba(37,99,235,0.35);
+      background: rgba(37,99,235,0.08);
+      color: rgba(37,99,235,0.85);
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }}
+    .privacy-subnav button.active {{
+      background: rgba(37,99,235,0.2);
+      border-color: rgba(37,99,235,0.9);
+      color: rgba(15,23,42,0.95);
+      box-shadow: 0 4px 12px rgba(37,99,235,0.25);
+    }}
+    .privacy-page-cards {{
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      margin: 20px 0 8px;
+    }}
+    .privacy-page-card {{
+      background: rgba(148,163,184,0.12);
+      border: 1px solid rgba(148,163,184,0.2);
+      border-radius: 14px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .privacy-page-card__header {{
+      font-weight: 600;
+      font-size: 1rem;
+      color: var(--fg);
+      word-break: break-word;
+    }}
+    .privacy-page-card__status {{
+      font-size: 0.85rem;
+      color: rgba(71,85,105,0.95);
+    }}
+    .privacy-page-card__pages {{
+      margin: 8px 0 0;
+      padding-left: 18px;
+      font-size: 0.85rem;
+      color: rgba(71,85,105,0.95);
+    }}
+    .privacy-subviews {{
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }}
+    .privacy-subview {{
+      display: none;
+    }}
+    .privacy-subview.active {{
+      display: block;
+    }}
     section.panel {{
       display: none;
     }}
@@ -590,6 +848,7 @@ def render_report(
     .table-container table {{
       width: 100%;
       min-width: 640px;
+      table-layout: fixed;
     }}
     table {{
       width: 100%;
@@ -602,6 +861,8 @@ def render_report(
       border-bottom: 1px solid rgba(148,163,184,0.4);
       text-align: left;
       vertical-align: top;
+      word-break: break-word;
+      overflow-wrap: anywhere;
     }}
     th {{
       background: rgba(15,23,42,0.05);
@@ -666,12 +927,17 @@ def render_report(
       color: rgba(71,85,105,0.9);
     }}
     .empty {{ color: var(--muted); text-align: center; padding: 32px 0; }}
-    .filters {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }}
+    .filters {{ display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; align-items: center; }}
+    .filter-label {{
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: rgba(71,85,105,0.95);
+    }}
     .filters input {{
       padding: 10px 14px;
       border-radius: 12px;
       border: 1px solid rgba(148,163,184,0.7);
-      min-width: 220px;
+      min-width: 260px;
       font-size: 0.95rem;
       background: #ffffff;
       color: var(--fg);
@@ -686,6 +952,8 @@ def render_report(
       border-color: rgba(37,99,235,0.6);
       box-shadow: 0 0 0 3px rgba(37,99,235,0.25);
     }}
+    .chip-groups {{ display: flex; flex-direction: column; gap: 8px; width: 100%; }}
+    .chip-row {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
     .type-filter, .reason-filter {{
       display: flex;
       gap: 8px;
@@ -728,6 +996,8 @@ def render_report(
       color: #ea580c;
       border: 1px solid rgba(234,88,12,0.3);
     }}
+    .cookie-origin-first {{ color: rgba(34,197,94,0.8); font-weight: 600; }}
+    .cookie-origin-third {{ color: rgba(234,88,12,0.85); font-weight: 600; }}
     footer {{
       text-align: center;
       padding: 24px 0 48px;
@@ -775,21 +1045,21 @@ def render_report(
         }});
       }});
     }}
-    function setupRiskFilter(inputId, tableId, reasonGroupId) {{
+    function setupChipFilter(inputId, tableId, groupId, attrName) {{
       var input = document.getElementById(inputId);
       var table = document.getElementById(tableId);
-      var group = document.getElementById(reasonGroupId);
+      var group = document.getElementById(groupId);
       if (!table) return;
       var buttons = group ? Array.from(group.querySelectorAll('button')) : [];
-      var activeReason = 'all';
+      var activeValue = 'all';
       function applyFilters() {{
         var textFilter = input ? input.value.toLowerCase() : '';
         Array.from(table.querySelectorAll('tbody tr')).forEach(function(row) {{
           var text = row.textContent.toLowerCase();
-          var reasons = (row.dataset.reasons || '').split(' ').filter(Boolean);
-          var matchReason = activeReason === 'all' || reasons.indexOf(activeReason) > -1;
+          var tokens = (row.dataset[attrName] || '').split(' ').filter(Boolean);
+          var matchChip = activeValue === 'all' || tokens.indexOf(activeValue) > -1;
           var matchText = !textFilter || text.indexOf(textFilter) > -1;
-          row.style.display = matchReason && matchText ? '' : 'none';
+          row.style.display = matchChip && matchText ? '' : 'none';
         }});
       }}
       if (input) input.addEventListener('input', applyFilters);
@@ -797,12 +1067,76 @@ def render_report(
         buttons.forEach(function(btn) {{
           btn.addEventListener('click', function() {{
             buttons.forEach(function(b) {{ b.classList.toggle('active', b === btn); }});
-            activeReason = btn.dataset.reason || 'all';
+            activeValue = btn.dataset.reason || 'all';
             applyFilters();
           }});
         }});
       }}
       applyFilters();
+    }}
+    function setupCookieFilter(inputId, tableId, originGroupId, issueGroupId) {{
+      var input = document.getElementById(inputId);
+      var table = document.getElementById(tableId);
+      var originGroup = document.getElementById(originGroupId);
+      var issueGroup = document.getElementById(issueGroupId);
+      if (!table) return;
+      var originButtons = originGroup ? Array.from(originGroup.querySelectorAll('button')) : [];
+      var issueButtons = issueGroup ? Array.from(issueGroup.querySelectorAll('button')) : [];
+      var activeOrigin = 'all';
+      var activeIssue = 'all';
+      function applyFilters() {{
+        var textFilter = input ? input.value.toLowerCase() : '';
+        Array.from(table.querySelectorAll('tbody tr')).forEach(function(row) {{
+          var text = row.textContent.toLowerCase();
+          var origin = row.dataset.origin;
+          var issues = (row.dataset.issues || '').split(' ').filter(Boolean);
+          var matchOrigin = activeOrigin === 'all' || origin === activeOrigin;
+          var matchIssue = activeIssue === 'all' || issues.indexOf(activeIssue) > -1;
+          var matchText = !textFilter || text.indexOf(textFilter) > -1;
+          row.style.display = matchOrigin && matchIssue && matchText ? '' : 'none';
+        }});
+      }}
+      if (input) input.addEventListener('input', applyFilters);
+      if (originButtons.length) {{
+        originButtons.forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            originButtons.forEach(function(b) {{ b.classList.toggle('active', b === btn); }});
+            activeOrigin = btn.dataset.reason || 'all';
+            applyFilters();
+          }});
+        }});
+      }}
+      if (issueButtons.length) {{
+        issueButtons.forEach(function(btn) {{
+          btn.addEventListener('click', function() {{
+            issueButtons.forEach(function(b) {{ b.classList.toggle('active', b === btn); }});
+            activeIssue = btn.dataset.reason || 'all';
+            applyFilters();
+          }});
+        }});
+      }}
+      applyFilters();
+    }}
+    function setupPrivacySubnav() {{
+      var nav = document.getElementById('privacy-subnav');
+      if (!nav) return;
+      var buttons = Array.from(nav.querySelectorAll('button[data-view]'));
+      if (!buttons.length) return;
+      var views = Array.from(document.querySelectorAll('.privacy-subview'));
+      function activate(target) {{
+        buttons.forEach(function(btn) {{
+          btn.classList.toggle('active', btn.dataset.view === target);
+        }});
+        views.forEach(function(view) {{
+          view.classList.toggle('active', view.dataset.view === target);
+        }});
+      }}
+      buttons.forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+          activate(btn.dataset.view);
+        }});
+      }});
+      activate(buttons[0].dataset.view);
     }}
     function setupPanels() {{
       var buttons = Array.from(document.querySelectorAll('.panel-nav button'));
@@ -826,10 +1160,12 @@ def render_report(
     }}
     document.addEventListener('DOMContentLoaded', function() {{
       setupFilter('urls-filter', 'urls-table');
-      setupRiskFilter('risk-filter', 'risk-table', 'risk-reason-filter');
+      setupChipFilter('risk-filter', 'risk-table', 'risk-reason-filter', 'reasons');
       setupFilter('reputation-filter', 'reputation-table');
       setupFilter('js-filter', 'js-table');
       setupFilter('privacy-filter', 'privacy-table');
+      setupCookieFilter('cookie-filter', 'cookie-table', 'cookie-type-filter', 'cookie-issue-filter');
+      setupPrivacySubnav();
       setupTypeFilter('urls-type-filter', 'urls-table');
       setupPanels();
     }});
@@ -960,6 +1296,7 @@ def render_report(
       <h2>Analise de Privacidade ({len(privacy_items)})</h2>
       <p class=\"muted\">Cookies, trackers e outros sinais coletados nas páginas visitadas.</p>
       <div class=\"metric-grid\">{privacy_metrics_html or '<div class=\"empty\">Sem metricas de privacidade.</div>'}</div>
+      {privacy_page_cards_html}
       <div class=\"filters\">
         <input id=\"privacy-filter\" type=\"search\" placeholder=\"Filtrar por pagina, tracker ou cookie...\" aria-label=\"Filtro de privacidade\" />
       </div>
@@ -978,6 +1315,86 @@ def render_report(
             {privacy_rows}
           </tbody>
         </table>
+      </div>
+      <div class=\"privacy-subnav\" id=\"privacy-subnav\">
+        <span class=\"filter-label\">Ver detalhes:</span>
+        <button data-view=\"cookies\" class=\"active\">Cookies analisados ({privacy_cookie_count})</button>
+        {'' if not keylogging_count else f'<button data-view="keylogging">Teclas monitoradas ({keylogging_count})</button>'}
+        {'' if not storage_count else f'<button data-view="storage">Armazenamento local ({storage_count})</button>'}
+      </div>
+      <div class=\"privacy-subviews\">
+        <div class=\"privacy-subview active\" data-view=\"cookies\">
+          <h3>Cookies analisados ({privacy_cookie_count})</h3>
+          <div class=\"filters\">
+            <input id=\"cookie-filter\" type=\"search\" placeholder=\"Filtrar por nome, dominio ou categoria...\" aria-label=\"Filtro de cookies\" />
+          </div>
+          <div class=\"chip-groups\">
+            <div class=\"reason-filter chip-row\" id=\"cookie-type-filter\">
+              <span class=\"filter-label\">Origem do cookie:</span>
+              <button data-reason=\"all\" class=\"active\">Todos</button>
+              <button data-reason=\"third\">Terceiros</button>
+              <button data-reason=\"first\">Próprio</button>
+            </div>
+            {cookie_issue_filter}
+          </div>
+          <div class=\"table-container\">
+            <table id=\"cookie-table\">
+              <thead>
+                <tr>
+                  <th>Pagina</th>
+                  <th>Nome</th>
+                  <th>Domínio</th>
+                  <th>Categoria</th>
+                  <th>Issues</th>
+                  <th>Origem</th>
+                </tr>
+              </thead>
+              <tbody>
+                {privacy_cookies_rows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {'' if not keylogging_count else f"""
+        <div class=\"privacy-subview\" data-view=\"keylogging\">
+          <h3>Teclas monitoradas ({keylogging_count})</h3>
+          <div class=\"table-container\">
+            <table id=\"keylogging-table\">
+              <thead>
+                <tr>
+                  <th>Pagina</th>
+                  <th>Evento</th>
+                  <th>Elemento</th>
+                  <th>Ocorrências</th>
+                </tr>
+              </thead>
+              <tbody>
+                {keylogging_table_rows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        """}
+        {'' if not storage_count else f"""
+        <div class=\"privacy-subview\" data-view=\"storage\">
+          <h3>Armazenamento detectado ({storage_count})</h3>
+          <div class=\"table-container\">
+            <table id=\"storage-table\">
+              <thead>
+                <tr>
+                  <th>Pagina</th>
+                  <th>Tipo</th>
+                  <th>Chave</th>
+                  <th>Ocorrências</th>
+                </tr>
+              </thead>
+              <tbody>
+                {storage_table_rows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        """}
       </div>
     </section>
     """}

@@ -135,6 +135,64 @@ open out/report.html  # macOS (ou use xdg-open/Start-Process)
 
 A subcomando `webcarto report` e o script aceitam `--output` para escolher outro caminho
 e `--title` para personalizar o título mostrado.
+- Quando `out/js-analysis.json` existir, o relatório inclui automaticamente uma
+  seção com a análise dos scripts (categorias, flags e referências OWASP/MITRE).
+
+## Análise de JavaScript pós-crawl
+
+Use o novo subcomando para inspecionar scripts coletados (usa `out/urls.json` existente):
+
+```bash
+# assume que o crawl anterior já gerou out/urls.json
+webcarto analyze-js --urls out/urls.json --output out/js-analysis.json
+
+# opções úteis
+webcarto analyze-js --limit 10           # já é verboso por padrão
+webcarto analyze-js --quiet              # reduz logs (modo enxuto)
+webcarto analyze-js --script-url https://example.com/app.js
+webcarto analyze-js --refresh            # refaz análise ignorando cache
+```
+
+O arquivo `out/js-analysis.json` inclui hashes, heurísticas de ofuscação, amostras de
+potenciais IOCs (`potential_ioc_sample`), categorias de comportamento suspeito por
+token (`token_categories`), marcações de alto risco (`high_risk`) e, quando
+disponível, a reputação do host reaproveitada de `out/reputation.json`.
+Se `out/privacy.json` estiver presente, o relatório HTML exibirá também uma seção de
+privacidade (cookies, trackers e issues encontrados durante a varredura).
+
+Categorias de tokens atualmente suportadas (com referências OWASP/MITRE):
+- `exec_dynamic`: uso de `eval`, `Function`, `setTimeout`/`setInterval` com strings (OWASP A03; MITRE T1059.007).
+- `dom_injection`: manipulação direta do DOM (`document.write`, `innerHTML` suspeito) (OWASP A03/A05; MITRE T1185/T1608).
+- `net_beacon`: chamadas de rede (`fetch`, `XMLHttpRequest`, `WebSocket`, `sendBeacon`) (OWASP A05; MITRE T1071).
+- `obfuscation`: sinais de ofuscação (`atob`, `crypto.subtle`, unicode invisível) (OWASP A04; MITRE T1027).
+- `redirect_control`: escrita explícita em `window.location`/`location.href` (OWASP A01; MITRE T1204/T1185).
+- `storage_sensitive`: leitura/escrita de `localStorage`, `sessionStorage`, `document.cookie` (OWASP A07; MITRE T1555).
+- `third_party_loader`: `import()` dinâmico ou injeção de `<script>` (OWASP A08; MITRE T1105/T1608).
+- `cross_context`: uso de `postMessage` sem validação aparente (OWASP A01/A08; MITRE T1102).
+
+O campo `high_risk` fica `true` quando combinações como `exec_dynamic+obfuscation`,
+`exec_dynamic+net_beacon`, `redirect_control+net_beacon` ou ofuscação extrema (score ≥7
+com unicode e muitos possíveis IOCs) são detectadas.
+
+## Auditoria de privacidade
+
+```bash
+# Usa as páginas do último crawl (out/urls.json) e grava em out/privacy.json
+webcarto privacy-check --output out/privacy.json
+
+# Com URL específica (sem precisar do JSON)
+webcarto privacy-check --url https://example.com
+
+# Modo silencioso
+webcarto privacy-check --quiet
+```
+
+O arquivo `out/privacy.json` lista cookies (incluindo terceiros), trackers conhecidos,
+possíveis sinais de fingerprinting, formulários que enviam dados para domínios
+externos e demais issues semelhantes ao Blacklight.
+
+> Após instalar as dependências (`pip install -r requirements.txt`), execute
+> `playwright install chromium` uma única vez para baixar o navegador headless.
 
 ## Estrutura
 

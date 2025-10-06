@@ -220,6 +220,7 @@ def assess_url_risk(url: str, *, page: Optional[str] = None, origin: Optional[st
         nested = False
         b64 = False
         pii = False
+        pii_high = False
         contact_phone_added = False
         for k, v in params:
             kl = (k or "").lower()
@@ -269,6 +270,8 @@ def assess_url_risk(url: str, *, page: Optional[str] = None, origin: Optional[st
                     # não marcar como PII
                 else:
                     pii = True
+                    if kl in {"token", "api_key", "key", "secret"}:
+                        pii_high = True
         if nested:
             tags.append("param-redirect")
             reasons.append("Parâmetro contendo URL possivelmente redirecionada")
@@ -292,7 +295,7 @@ def assess_url_risk(url: str, *, page: Optional[str] = None, origin: Optional[st
         if pii:
             tags.append("pii/secret-in-url")
             reasons.append("Parâmetro com possível PII/segredo (email/token/chave)")
-            score += 3
+            score += 6 if pii_high else 3
 
     # Mixed content (se tivermos contexto)
     if page and page.startswith("https://") and url.startswith("http://"):
