@@ -147,10 +147,14 @@ Use o novo subcomando para inspecionar scripts coletados (usa `out/urls.json` ex
 webcarto analyze-js --urls out/urls.json --output out/js-analysis.json
 
 # opções úteis
-webcarto analyze-js --limit 10           # já é verboso por padrão
-webcarto analyze-js --quiet              # reduz logs (modo enxuto)
-webcarto analyze-js --script-url https://example.com/app.js
-webcarto analyze-js --refresh            # refaz análise ignorando cache
+webcarto analyze-js --script-url https://example.com/app.js   # ignora o JSON e analisa só esse script
+webcarto analyze-js --limit 10                                # restringe a quantidade de scripts
+webcarto analyze-js --quiet                                   # reduz logs (modo enxuto)
+webcarto analyze-js --refresh                                 # refaz análise ignorando cache local
+webcarto analyze-js --include-subdomains                      # trata subdomínios como internos
+webcarto analyze-js --timeout 20 --retries 3 --retry-backoff 0.5
+webcarto analyze-js --reputation out/reputation.json          # reaproveita cache de reputação existente
+webcarto analyze-js --strict                                  # aborta na primeira falha
 ```
 
 O arquivo `out/js-analysis.json` inclui hashes, heurísticas de ofuscação, amostras de
@@ -183,8 +187,12 @@ webcarto privacy-check --output out/privacy.json
 # Com URL específica (sem precisar do JSON)
 webcarto privacy-check --url https://example.com
 
-# Modo silencioso
-webcarto privacy-check --quiet
+# Personalizações úteis
+webcarto privacy-check --limit 5            # audita apenas as N primeiras páginas do JSON
+webcarto privacy-check --timeout 30000      # aumenta o timeout do Playwright (ms)
+webcarto privacy-check --no-headless        # abre o navegador visível (depuração)
+webcarto privacy-check --reputation out/reputation.json
+webcarto privacy-check --quiet              # reduz logs no terminal
 ```
 
 O arquivo `out/privacy.json` lista cookies (incluindo terceiros), trackers conhecidos,
