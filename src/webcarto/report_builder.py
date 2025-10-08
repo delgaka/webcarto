@@ -101,6 +101,23 @@ METRIC_ICONS = {
 }
 
 
+REPUTATION_VERDICT_LABELS = {
+    "malicious": "Maliciosos",
+    "suspicious": "Suspeitos",
+    "clean": "Limpos",
+    "unknown": "Desconhecidos",
+}
+
+
+JS_FLAG_LABELS = {
+    "alto": "Alto risco",
+    "suspeito": "Suspeitos",
+    "ofuscado": "Ofuscação",
+    "erro": "Com erro",
+    "limpo": "Sem alerta",
+}
+
+
 def _friendly_name(key: str) -> str:
     key_lower = key.lower()
     if key_lower in FRIENDLY_LABELS:
@@ -135,6 +152,44 @@ def _merge_summary_metrics(risk_metrics: Dict[str, Any], reputation_metrics: Dic
     if privacy_metrics:
         merged["privacy_summary"] = privacy_metrics
     return merged
+
+
+def _normalize_verdict_value(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in REPUTATION_VERDICT_LABELS:
+        return raw
+    return "unknown"
+
+
+def _consolidate_reputation_verdict(providers: Dict[str, Any]) -> str:
+    order = {"malicious": 3, "suspicious": 2, "clean": 1, "unknown": 0}
+    best = ("unknown", 0)
+    for info in (providers or {}).values():
+        payload = info
+        if isinstance(info, dict) and isinstance(info.get("data"), dict):
+            payload = info["data"]
+        verdict = _normalize_verdict_value(payload.get("verdict") if isinstance(payload, dict) else payload)
+        score = order.get(verdict, 0)
+        if score > best[1]:
+            best = (verdict, score)
+    return best[0]
+
+
+def _js_flags(entry: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    if entry.get("error"):
+        flags.append("erro")
+        return flags
+    if entry.get("high_risk"):
+        flags.append("alto")
+    if entry.get("suspicious_tokens"):
+        flags.append("suspeito")
+    score = entry.get("obfuscation_score")
+    if isinstance(score, (int, float)) and score >= 6:
+        flags.append("ofuscado")
+    if not flags:
+        flags.append("limpo")
+    return flags
 
 
 def _slugify(text: str) -> str:
@@ -403,30 +458,67 @@ def render_report(
         reason_filter_group = ""
 
     reputation_rows = []
+    verdict_counts: Dict[str, int] = {}
     for item in reputation_items:
-        provider_html = _render_provider_badges(item.get("providers") or {})
+        providers = item.get("providers") or {}
+        combined = _consolidate_reputation_verdict(providers)
+        verdict_counts[combined] = verdict_counts.get(combined, 0) + 1
+        tokens = {combined}
+        for prov_info in providers.values():
+            payload = prov_info
+            if isinstance(prov_info, dict) and isinstance(prov_info.get("data"), dict):
+                payload = prov_info["data"]
+            verdict = _normalize_verdict_value(payload.get("verdict") if isinstance(payload, dict) else payload)
+            tokens.add(verdict)
+        if not tokens:
+            tokens.add("unknown")
+        provider_html = _render_provider_badges(providers)
         reputation_rows.append(
-            "<tr>"
+            f"<tr data-verdict=\"{_escape(' '.join(sorted(tokens)))}\">"
             f"<td>{_escape(item['host'])}</td>"
             f"<td>{provider_html}</td>"
             "</tr>"
         )
     reputation_table_body = "".join(reputation_rows) or "<tr><td colspan=\"2\" class=\"empty\">Sem dados de reputação.</td></tr>"
+    if verdict_counts:
+        verdict_buttons = ["<button data-reason=\"all\" class=\"active\">Todos</button>"]
+        for slug in ("malicious", "suspicious", "clean", "unknown"):
+            if verdict_counts.get(slug):
+                label = REPUTATION_VERDICT_LABELS.get(slug, slug.title())
+                verdict_buttons.append(f"<button data-reason=\"{slug}\">{_escape(label)}</button>")
+        reputation_filter_group = "<div class=\"reason-filter chip-row\" id=\"reputation-verdict-filter\">" + "".join(verdict_buttons) + "</div>"
+    else:
+        reputation_filter_group = ""
 
     js_items = js_analysis.get("items", []) if js_analysis else []
     js_metrics = js_analysis.get("metrics", {}) if js_analysis else {}
-
-    js_rows = "".join(
-        "<tr>"
-        f"<td>{_escape(entry.get('url'))}</td>"
-        f"<td>{_escape(entry.get('page'))}</td>"
-        f"<td>{_escape(', '.join(entry.get('token_categories') or []))}</td>"
-        f"<td>{_escape(', '.join(entry.get('owasp_refs') or []))}</td>"
-        f"<td>{_escape(', '.join(entry.get('mitre_techniques') or []))}</td>"
-        f"<td>{'HIGH' if entry.get('high_risk') else ''}</td>"
-        "</tr>"
-        for entry in js_items
-    ) or "<tr><td colspan=\"6\" class=\"empty\">Nenhum script analisado.</td></tr>"
+    js_rows_parts: List[str] = []
+    js_flag_counts: Dict[str, int] = {}
+    for entry in js_items:
+        flags = _js_flags(entry)
+        for flag in flags:
+            js_flag_counts[flag] = js_flag_counts.get(flag, 0) + 1
+        flag_tokens = " ".join(sorted(set(flags)))
+        js_rows_parts.append(
+            f"<tr data-flags=\"{_escape(flag_tokens)}\">"
+            f"<td>{_escape(entry.get('url'))}</td>"
+            f"<td>{_escape(entry.get('page'))}</td>"
+            f"<td>{_escape(', '.join(entry.get('token_categories') or []))}</td>"
+            f"<td>{_escape(', '.join(entry.get('owasp_refs') or []))}</td>"
+            f"<td>{_escape(', '.join(entry.get('mitre_techniques') or []))}</td>"
+            f"<td>{'HIGH' if entry.get('high_risk') else ''}</td>"
+            "</tr>"
+        )
+    js_rows = "".join(js_rows_parts) or "<tr><td colspan=\"6\" class=\"empty\">Nenhum script analisado.</td></tr>"
+    if js_flag_counts:
+        js_buttons = ["<button data-reason=\"all\" class=\"active\">Todos</button>"]
+        for slug in ("alto", "suspeito", "ofuscado", "erro", "limpo"):
+            if js_flag_counts.get(slug):
+                label = JS_FLAG_LABELS.get(slug, slug.title())
+                js_buttons.append(f"<button data-reason=\"{slug}\">{_escape(label)}</button>")
+        js_filter_group = "<div class=\"reason-filter chip-row\" id=\"js-flag-filter\">" + "".join(js_buttons) + "</div>"
+    else:
+        js_filter_group = ""
 
     combined_metrics = _merge_summary_metrics(risk_metrics, reputation.get("metrics", {}) if reputation else {}, privacy_metrics)
     metrics_html = _build_metric_list(combined_metrics)
@@ -1161,8 +1253,8 @@ def render_report(
     document.addEventListener('DOMContentLoaded', function() {{
       setupFilter('urls-filter', 'urls-table');
       setupChipFilter('risk-filter', 'risk-table', 'risk-reason-filter', 'reasons');
-      setupFilter('reputation-filter', 'reputation-table');
-      setupFilter('js-filter', 'js-table');
+      setupChipFilter('reputation-filter', 'reputation-table', 'reputation-verdict-filter', 'verdict');
+      setupChipFilter('js-filter', 'js-table', 'js-flag-filter', 'flags');
       setupFilter('privacy-filter', 'privacy-table');
       setupCookieFilter('cookie-filter', 'cookie-table', 'cookie-type-filter', 'cookie-issue-filter');
       setupPrivacySubnav();
@@ -1249,6 +1341,7 @@ def render_report(
       <h2>Reputação por host ({len(reputation_items)})</h2>
       <div class=\"filters\">
         <input id=\"reputation-filter\" type=\"search\" placeholder=\"Filtrar por host ou provedor...\" aria-label=\"Filtro de reputação\" />
+        {reputation_filter_group}
       </div>
       <div class=\"table-container\">
         <table id=\"reputation-table\">
@@ -1271,6 +1364,7 @@ def render_report(
       <div class=\"metric-grid\">{js_metrics_html or '<div class=\"empty\">Sem metricas para scripts.</div>'}</div>
       <div class=\"filters\">
         <input id=\"js-filter\" type=\"search\" placeholder=\"Filtrar scripts por URL, pagina ou categoria...\" aria-label=\"Filtro de scripts\" />
+        {js_filter_group}
       </div>
       <div class=\"table-container\">
         <table id=\"js-table\">
