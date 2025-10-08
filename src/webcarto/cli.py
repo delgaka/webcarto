@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from .crawler import Crawler, CrawlParams
 from .html_utils import extract_links_extended, extract_links_ordered
 from .http_utils import create_session
-from .io_utils import read_file, save_output, save_risk_report
+from .io_utils import read_file, save_output, save_risk_report, save_reputation_results
 from .metrics import compute_result_metrics
 from .reputation import (
     ReputationClient,
@@ -30,6 +30,10 @@ from .reputation import (
 from .risk import aggregate_risk, assess_url_risk, verify_param_redirect
 from .transforms import build_domain_tree
 from .urls_utils import _normalize_url, _same_site
+
+
+DEFAULT_REPUTATION_CACHE = "out/reputation-cache.json"
+DEFAULT_REPUTATION_OUTPUT = "out/reputation.json"
 
 def crawl_site(
     start_url: str,
@@ -201,7 +205,12 @@ def main() -> None:
     # Reputação (infra/CLI - ID 15)
     parser.add_argument("--verify-reputation", action="store_true", help="Consulta reputação externa (providers)")
     parser.add_argument("--reputation-providers", default="", help="Lista de providers (ex.: vt,gsb,urlhaus,otx)")
-    parser.add_argument("--reputation-cache", default="out/reputation.json", help="Cache local de reputação (JSON)")
+    parser.add_argument("--reputation-cache", default=DEFAULT_REPUTATION_CACHE, help="Cache local de reputação (JSON)")
+    parser.add_argument(
+        "--reputation-output",
+        default=DEFAULT_REPUTATION_OUTPUT,
+        help="Arquivo JSON com resultados da reputação para o site atual",
+    )
     parser.add_argument("--reputation-ttl", default="7d", help="TTL do cache (ex.: 7d, 24h, 3600s)")
     parser.add_argument("--reputation-concurrency", type=int, default=2, help="Consultas simultâneas aos provedores")
     parser.add_argument("--reputation-timeout", type=int, default=10, help="Timeout por requisição (s)")
@@ -299,45 +308,126 @@ def main() -> None:
                 return cur
         return cur
 
-    # Self-test de reputação (executa cedo e encerra)
-    if args.reputation_self_test:
+    def build_reputation_settings() -> Dict[str, Any]:
         prov_cfg = cfg_get("reputation", "providers")
         cache_cfg = cfg_get("reputation", "cache")
+        output_cfg = cfg_get("reputation", "output")
         ttl_cfg = cfg_get("reputation", "ttl")
         conc_cfg = cfg_get("reputation", "concurrency")
         to_cfg = cfg_get("reputation", "timeout")
         incl_q_cfg = cfg_get("reputation", "include_query")
         scrub_cfg = cfg_get("reputation", "scrub_params")
         keys_cfg = cfg_get("reputation", "keys")
-        providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or (
-            [p.strip() for p in (prov_cfg or "").split(",") if p.strip()] or None
-        )
-        ttl_s = parse_ttl(args.reputation_ttl if args.reputation_ttl != "7d" or not ttl_cfg else ttl_cfg)
-        cache_path = merge_arg(args.reputation_cache, "out/reputation.json", cache_cfg)
+
+        providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()]
+        if not providers_list and prov_cfg:
+            providers_list = [p.strip() for p in prov_cfg.split(",") if p.strip()]
+
+        ttl_arg = args.reputation_ttl
+        if ttl_arg == "7d" and ttl_cfg:
+            ttl_arg = ttl_cfg
+        ttl_seconds = parse_ttl(ttl_arg)
+
+        cache_path = merge_arg(args.reputation_cache, DEFAULT_REPUTATION_CACHE, cache_cfg)
+        output_path = merge_arg(args.reputation_output, DEFAULT_REPUTATION_OUTPUT, output_cfg)
         rep_conc = merge_arg(args.reputation_concurrency, 2, conc_cfg, int)
         rep_timeout = merge_arg(args.reputation_timeout, 10, to_cfg, int)
-        include_query = args.reputation_include_query or (str(incl_q_cfg).lower() == "true")
-        scrub_params = [s.strip() for s in (args.reputation_scrub_params or (scrub_cfg or "")).split(",") if s.strip()]
-        keys_map = {}
-        if args.reputation_keys:
-            for part in args.reputation_keys.split(","):
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    keys_map[k.strip()] = v.strip()
-        elif keys_cfg:
-            for part in keys_cfg.split(","):
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    keys_map[k.strip()] = v.strip()
+        include_query = args.reputation_include_query or (str(incl_q_cfg).lower() == "true" if incl_q_cfg is not None else False)
+
+        scrub_source = args.reputation_scrub_params if args.reputation_scrub_params != "utm_*,gclid,fbclid,trk,ref,src" or not scrub_cfg else scrub_cfg
+        scrub_vals = scrub_source or ""
+        scrub_params = [s.strip() for s in scrub_vals.split(",") if s.strip()]
+
+        keys_map: Dict[str, str] = {}
+        keys_source = args.reputation_keys or (keys_cfg or "")
+        for part in keys_source.split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                keys_map[k.strip()] = v.strip()
+
+        return {
+            "providers": providers_list or None,
+            "keys": keys_map or None,
+            "cache_path": str(cache_path),
+            "output_path": Path(output_path),
+            "ttl_seconds": ttl_seconds,
+            "include_query": include_query,
+            "scrub_params": scrub_params,
+            "concurrency": int(rep_conc),
+            "timeout": int(rep_timeout),
+            "strict": args.reputation_strict,
+            "dry_run": args.reputation_dry_run,
+            "verbose": args.verbose,
+        }
+
+    reputation_settings = build_reputation_settings()
+
+    def run_reputation_lookup(
+        risk_items: List[Dict[str, Any]],
+        *,
+        mode: str,
+        source: Optional[str],
+    ) -> Dict[str, Any]:
+        if not args.verify_reputation:
+            return {}
+        urls = {it.get("url") for it in risk_items if it.get("url")}
+        if not urls:
+            save_reputation_results(
+                {},
+                reputation_settings["output_path"],
+                meta={"source": source, "mode": mode, "unique_urls": 0},
+                metrics={},
+            )
+            return {}
         rep = ReputationClient(
-            providers=providers_list,
-            keys=keys_map or None,
-            cache_path=str(cache_path),
-            ttl_seconds=ttl_s,
-            include_query=include_query,
-            scrub_params=scrub_params,
-            concurrency=int(rep_conc),
-            timeout=int(rep_timeout),
+            providers=reputation_settings["providers"],
+            keys=reputation_settings["keys"],
+            cache_path=reputation_settings["cache_path"],
+            ttl_seconds=reputation_settings["ttl_seconds"],
+            include_query=reputation_settings["include_query"],
+            scrub_params=reputation_settings["scrub_params"],
+            concurrency=reputation_settings["concurrency"],
+            timeout=reputation_settings["timeout"],
+            strict=reputation_settings["strict"],
+            dry_run=reputation_settings["dry_run"],
+            verbose=reputation_settings["verbose"],
+        )
+        rep_results = rep.check_urls(urls)
+        for it in risk_items:
+            u = it.get("url")
+            if not u:
+                continue
+            pdata = rep_results.get(u) or {}
+            if not pdata:
+                continue
+            it["reputation"] = pdata
+            final_v = consolidate_verdict(pdata)
+            tag = f"reputation:{final_v}"
+            it.setdefault("tags", []).append(tag)
+            if final_v == "malicious":
+                it["score"] = int(it.get("score", 0)) + 6
+            elif final_v == "suspicious":
+                it["score"] = int(it.get("score", 0)) + 3
+        rep_metrics = build_reputation_metrics(rep_results)
+        save_reputation_results(
+            rep_results,
+            reputation_settings["output_path"],
+            meta={"source": source, "mode": mode, "unique_urls": len(urls)},
+            metrics=rep_metrics,
+        )
+        return rep_metrics
+
+    # Self-test de reputação (executa cedo e encerra)
+    if args.reputation_self_test:
+        rep = ReputationClient(
+            providers=reputation_settings["providers"],
+            keys=reputation_settings["keys"],
+            cache_path=reputation_settings["cache_path"],
+            ttl_seconds=reputation_settings["ttl_seconds"],
+            include_query=reputation_settings["include_query"],
+            scrub_params=reputation_settings["scrub_params"],
+            concurrency=reputation_settings["concurrency"],
+            timeout=reputation_settings["timeout"],
             strict=args.reputation_strict,
             dry_run=args.reputation_dry_run,
             verbose=args.verbose,
@@ -454,94 +544,9 @@ def main() -> None:
                     # origem estimada: args.url (online) ou base (offline)
                     origin = _normalize_url(args.url) if str(source).startswith("http") else (_normalize_url(base) if base else None)
                     risk_items.append(assess_url_risk(u, page=page, origin=origin))
-            # reputação (infra ID 15/17): consulta e incorpora no payload
+            rep_metrics: Dict[str, Any] = {}
             if args.verify_reputation:
-                # Config defaults
-                prov_cfg = cfg_get("reputation", "providers")
-                cache_cfg = cfg_get("reputation", "cache")
-                ttl_cfg = cfg_get("reputation", "ttl")
-                conc_cfg = cfg_get("reputation", "concurrency")
-                to_cfg = cfg_get("reputation", "timeout")
-                incl_q_cfg = cfg_get("reputation", "include_query")
-                scrub_cfg = cfg_get("reputation", "scrub_params")
-                keys_cfg = cfg_get("reputation", "keys")
-                # Mesclar
-                providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or (
-                    [p.strip() for p in (prov_cfg or "").split(",") if p.strip()] or None
-                )
-                ttl_s = parse_ttl(args.reputation_ttl if args.reputation_ttl != "7d" or not ttl_cfg else ttl_cfg)
-                cache_path = merge_arg(args.reputation_cache, "out/reputation.json", cache_cfg)
-                rep_conc = merge_arg(args.reputation_concurrency, 2, conc_cfg, int)
-                rep_timeout = merge_arg(args.reputation_timeout, 10, to_cfg, int)
-                include_query = args.reputation_include_query or (str(incl_q_cfg).lower() == "true")
-                scrub_params = [s.strip() for s in (args.reputation_scrub_params or (scrub_cfg or "")).split(",") if s.strip()]
-                keys_map = {}
-                if args.reputation_keys:
-                    for part in args.reputation_keys.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                elif keys_cfg:
-                    for part in keys_cfg.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                rep = ReputationClient(
-                    providers=providers_list,
-                    keys=keys_map or None,
-                    cache_path=str(cache_path),
-                    ttl_seconds=ttl_s,
-                    include_query=include_query,
-                    scrub_params=scrub_params,
-                    concurrency=int(rep_conc),
-                    timeout=int(rep_timeout),
-                    strict=args.reputation_strict,
-                    dry_run=args.reputation_dry_run,
-                    verbose=args.verbose,
-                )
-                rep_results = rep.check_urls({it["url"] for it in risk_items if it.get("url")})
-                # incorporar reputação nos itens (ID 17)
-                for it in risk_items:
-                    u = it.get("url")
-                    if not u:
-                        continue
-                    pdata = rep_results.get(u) or {}
-                    if pdata:
-                        it["reputation"] = pdata
-                        final_v = consolidate_verdict(pdata)
-                        # tags/score
-                        tag = f"reputation:{final_v}"
-                        it.setdefault("tags", []).append(tag)
-                        if final_v == "malicious":
-                            it["score"] = int(it.get("score", 0)) + 6
-                        elif final_v == "suspicious":
-                            it["score"] = int(it.get("score", 0)) + 3
-                rep_metrics = build_reputation_metrics(rep_results)
-            # reputação (infra ID 15): consulta sem alterar o payload (ID 17 fará integração)
-            if args.verify_reputation:
-                keys_map = {}
-                if args.reputation_keys:
-                    for part in args.reputation_keys.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or None
-                ttl_s = parse_ttl(args.reputation_ttl)
-                scrub_params = [s.strip() for s in (args.reputation_scrub_params or "").split(",") if s.strip()]
-                rep = ReputationClient(
-                    providers=providers_list,
-                    keys=keys_map,
-                    cache_path=str(args.reputation_cache),
-                    ttl_seconds=ttl_s,
-                    include_query=args.reputation_include_query,
-                    scrub_params=scrub_params,
-                    concurrency=args.reputation_concurrency,
-                    timeout=args.reputation_timeout,
-                    strict=args.reputation_strict,
-                    dry_run=args.reputation_dry_run,
-                    verbose=args.verbose,
-                )
-                _ = rep.check_urls({it["url"] for it in risk_items if it.get("url")})
+                rep_metrics = run_reputation_lookup(risk_items, mode="page-tree", source=source)
             # verificação opcional de redirects (online)
             if args.verify_redirects:
                 sess = create_session(retries=args.retries, backoff_factor=args.retry_backoff)
@@ -598,87 +603,9 @@ def main() -> None:
             # Sem contexto de página, mas ainda útil
             origin = _normalize_url(base) if (args.input_file or args.offline) else _normalize_url(args.url)
             risk_items = [assess_url_risk(u, origin=origin) for u in urls]
+            rep_metrics: Dict[str, Any] = {}
             if args.verify_reputation:
-                prov_cfg = cfg_get("reputation", "providers")
-                cache_cfg = cfg_get("reputation", "cache")
-                ttl_cfg = cfg_get("reputation", "ttl")
-                conc_cfg = cfg_get("reputation", "concurrency")
-                to_cfg = cfg_get("reputation", "timeout")
-                incl_q_cfg = cfg_get("reputation", "include_query")
-                scrub_cfg = cfg_get("reputation", "scrub_params")
-                keys_cfg = cfg_get("reputation", "keys")
-                providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or (
-                    [p.strip() for p in (prov_cfg or "").split(",") if p.strip()] or None
-                )
-                ttl_s = parse_ttl(args.reputation_ttl if args.reputation_ttl != "7d" or not ttl_cfg else ttl_cfg)
-                cache_path = merge_arg(args.reputation_cache, "out/reputation.json", cache_cfg)
-                rep_conc = merge_arg(args.reputation_concurrency, 2, conc_cfg, int)
-                rep_timeout = merge_arg(args.reputation_timeout, 10, to_cfg, int)
-                include_query = args.reputation_include_query or (str(incl_q_cfg).lower() == "true")
-                scrub_params = [s.strip() for s in (args.reputation_scrub_params or (scrub_cfg or "")).split(",") if s.strip()]
-                keys_map = {}
-                if args.reputation_keys:
-                    for part in args.reputation_keys.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                elif keys_cfg:
-                    for part in keys_cfg.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                rep = ReputationClient(
-                    providers=providers_list,
-                    keys=keys_map or None,
-                    cache_path=str(cache_path),
-                    ttl_seconds=ttl_s,
-                    include_query=include_query,
-                    scrub_params=scrub_params,
-                    concurrency=int(rep_conc),
-                    timeout=int(rep_timeout),
-                    strict=args.reputation_strict,
-                    dry_run=args.reputation_dry_run,
-                    verbose=args.verbose,
-                )
-                rep_results = rep.check_urls({it["url"] for it in risk_items if it.get("url")})
-                for it in risk_items:
-                    u = it.get("url")
-                    if not u:
-                        continue
-                    pdata = rep_results.get(u) or {}
-                    if pdata:
-                        it["reputation"] = pdata
-                        final_v = consolidate_verdict(pdata)
-                        it.setdefault("tags", []).append(f"reputation:{final_v}")
-                        if final_v == "malicious":
-                            it["score"] = int(it.get("score", 0)) + 6
-                        elif final_v == "suspicious":
-                            it["score"] = int(it.get("score", 0)) + 3
-                rep_metrics = build_reputation_metrics(rep_results)
-            if args.verify_reputation:
-                keys_map = {}
-                if args.reputation_keys:
-                    for part in args.reputation_keys.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or None
-                ttl_s = parse_ttl(args.reputation_ttl)
-                scrub_params = [s.strip() for s in (args.reputation_scrub_params or "").split(",") if s.strip()]
-                rep = ReputationClient(
-                    providers=providers_list,
-                    keys=keys_map,
-                    cache_path=str(args.reputation_cache),
-                    ttl_seconds=ttl_s,
-                    include_query=args.reputation_include_query,
-                    scrub_params=scrub_params,
-                    concurrency=args.reputation_concurrency,
-                    timeout=args.reputation_timeout,
-                    strict=args.reputation_strict,
-                    dry_run=args.reputation_dry_run,
-                    verbose=args.verbose,
-                )
-                _ = rep.check_urls({it["url"] for it in risk_items if it.get("url")})
+                rep_metrics = run_reputation_lookup(risk_items, mode="tree", source=source)
             if args.verify_redirects:
                 sess = create_session(retries=args.retries, backoff_factor=args.retry_backoff)
                 for it in risk_items:
@@ -723,87 +650,9 @@ def main() -> None:
         if args.risk_report:
             origin = _normalize_url(base) if (args.input_file or args.offline) else _normalize_url(args.url)
             risk_items = [assess_url_risk(u, origin=origin) for u in urls]
+            rep_metrics: Dict[str, Any] = {}
             if args.verify_reputation:
-                prov_cfg = cfg_get("reputation", "providers")
-                cache_cfg = cfg_get("reputation", "cache")
-                ttl_cfg = cfg_get("reputation", "ttl")
-                conc_cfg = cfg_get("reputation", "concurrency")
-                to_cfg = cfg_get("reputation", "timeout")
-                incl_q_cfg = cfg_get("reputation", "include_query")
-                scrub_cfg = cfg_get("reputation", "scrub_params")
-                keys_cfg = cfg_get("reputation", "keys")
-                providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or (
-                    [p.strip() for p in (prov_cfg or "").split(",") if p.strip()] or None
-                )
-                ttl_s = parse_ttl(args.reputation_ttl if args.reputation_ttl != "7d" or not ttl_cfg else ttl_cfg)
-                cache_path = merge_arg(args.reputation_cache, "out/reputation.json", cache_cfg)
-                rep_conc = merge_arg(args.reputation_concurrency, 2, conc_cfg, int)
-                rep_timeout = merge_arg(args.reputation_timeout, 10, to_cfg, int)
-                include_query = args.reputation_include_query or (str(incl_q_cfg).lower() == "true")
-                scrub_params = [s.strip() for s in (args.reputation_scrub_params or (scrub_cfg or "")).split(",") if s.strip()]
-                keys_map = {}
-                if args.reputation_keys:
-                    for part in args.reputation_keys.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                elif keys_cfg:
-                    for part in keys_cfg.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                rep = ReputationClient(
-                    providers=providers_list,
-                    keys=keys_map or None,
-                    cache_path=str(cache_path),
-                    ttl_seconds=ttl_s,
-                    include_query=include_query,
-                    scrub_params=scrub_params,
-                    concurrency=int(rep_conc),
-                    timeout=int(rep_timeout),
-                    strict=args.reputation_strict,
-                    dry_run=args.reputation_dry_run,
-                    verbose=args.verbose,
-                )
-                rep_results = rep.check_urls({it["url"] for it in risk_items if it.get("url")})
-                for it in risk_items:
-                    u = it.get("url")
-                    if not u:
-                        continue
-                    pdata = rep_results.get(u) or {}
-                    if pdata:
-                        it["reputation"] = pdata
-                        final_v = consolidate_verdict(pdata)
-                        it.setdefault("tags", []).append(f"reputation:{final_v}")
-                        if final_v == "malicious":
-                            it["score"] = int(it.get("score", 0)) + 6
-                        elif final_v == "suspicious":
-                            it["score"] = int(it.get("score", 0)) + 3
-                rep_metrics = build_reputation_metrics(rep_results)
-            if args.verify_reputation:
-                keys_map = {}
-                if args.reputation_keys:
-                    for part in args.reputation_keys.split(","):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            keys_map[k.strip()] = v.strip()
-                providers_list = [p.strip() for p in args.reputation_providers.split(",") if p.strip()] or None
-                ttl_s = parse_ttl(args.reputation_ttl)
-                scrub_params = [s.strip() for s in (args.reputation_scrub_params or "").split(",") if s.strip()]
-                rep = ReputationClient(
-                    providers=providers_list,
-                    keys=keys_map,
-                    cache_path=str(args.reputation_cache),
-                    ttl_seconds=ttl_s,
-                    include_query=args.reputation_include_query,
-                    scrub_params=scrub_params,
-                    concurrency=args.reputation_concurrency,
-                    timeout=args.reputation_timeout,
-                    strict=args.reputation_strict,
-                    dry_run=args.reputation_dry_run,
-                    verbose=args.verbose,
-                )
-                _ = rep.check_urls({it["url"] for it in risk_items if it.get("url")})
+                rep_metrics = run_reputation_lookup(risk_items, mode="list", source=source)
             if args.verify_redirects:
                 sess = create_session(retries=args.retries, backoff_factor=args.retry_backoff)
                 for it in risk_items:

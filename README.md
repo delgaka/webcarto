@@ -153,14 +153,14 @@ webcarto analyze-js --quiet                                   # reduz logs (modo
 webcarto analyze-js --refresh                                 # refaz análise ignorando cache local
 webcarto analyze-js --include-subdomains                      # trata subdomínios como internos
 webcarto analyze-js --timeout 20 --retries 3 --retry-backoff 0.5
-webcarto analyze-js --reputation out/reputation.json          # reaproveita cache de reputação existente
+webcarto analyze-js --reputation out/reputation.json          # reutiliza resultados de reputação da última análise de risco
 webcarto analyze-js --strict                                  # aborta na primeira falha
 ```
 
 O arquivo `out/js-analysis.json` inclui hashes, heurísticas de ofuscação, amostras de
 potenciais IOCs (`potential_ioc_sample`), categorias de comportamento suspeito por
 token (`token_categories`), marcações de alto risco (`high_risk`) e, quando
-disponível, a reputação do host reaproveitada de `out/reputation.json`.
+disponível, a reputação do host reaproveitada de `out/reputation.json` (gerado por `--verify-reputation`).
 Se `out/privacy.json` estiver presente, o relatório HTML exibirá também uma seção de
 privacidade (cookies, trackers e issues encontrados durante a varredura).
 
@@ -434,7 +434,8 @@ Notas:
 - `--verify-redirects`: verifica via HEAD se parâmetros geram 3xx externo
 - `--verify-reputation`: consulta reputação externa (providers) — infra
 - `--reputation-providers`: lista de providers (ex.: vt,gsb,urlhaus,otx)
-- `--reputation-cache`: caminho do cache de reputação (JSON)
+- `--reputation-cache`: caminho do cache de reputação (JSON, padrão `out/reputation-cache.json`)
+- `--reputation-output`: arquivo com os resultados da reputação para o site atual (padrão `out/reputation.json`)
 - `--reputation-ttl`: TTL do cache (ex.: 7d, 24h, 3600s)
 - `--reputation-concurrency`: paralelismo das consultas
 - `--reputation-timeout`: timeout por requisição (s)
@@ -503,7 +504,8 @@ Arquivo de configuração INI (opcional)
 - Use `--config webcarto.ini` (ou crie `webcarto.ini` na raiz). Seção suportada nesta fase:
   - `[reputation]`
     - `providers = vt,gsb,urlhaus,otx`
-    - `cache = out/reputation.json`
+    - `cache = out/reputation-cache.json`
+    - `output = out/reputation.json`
     - `ttl = 7d`
     - `concurrency = 2`
     - `timeout = 10`

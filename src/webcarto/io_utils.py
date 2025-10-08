@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Union
+from typing import List, Dict, Optional, Any, Union, Set
 import json
 import datetime
+from urllib.parse import urlparse
 
 
 def read_file(path: Path) -> str:
@@ -128,5 +129,65 @@ def save_risk_report(
         "meta": meta or {},
         "metrics": metrics or {},
         "items": items,
+    }
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_reputation_results(
+    results: Dict[str, Dict[str, Any]],
+    out_path: Path,
+    *,
+    meta: Optional[Dict[str, Any]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist sanitized reputation results (per run) decoupled from the cache.
+
+    results: map[url -> {provider -> data}] as returned by ReputationClient.check_urls.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+
+    aggregated: Dict[str, Dict[str, Any]] = {}
+    for original_url, provider_map in results.items():
+        if not isinstance(provider_map, dict):
+            continue
+        parsed = urlparse(original_url)
+        host = (parsed.hostname or parsed.netloc or original_url).lower()
+        if not host:
+            host = original_url
+        entry = aggregated.setdefault(host, {"providers": {}, "urls": set(), "last": now_iso})
+        urls_set: Set[str] = entry["urls"]  # type: ignore[assignment]
+        urls_set.add(original_url)
+        providers_out: Dict[str, Any] = entry["providers"]  # type: ignore[assignment]
+        for provider, info in provider_map.items():
+            sanitized: Dict[str, Any] = {}
+            if isinstance(info, dict):
+                payload = info.get("data") if isinstance(info.get("data"), dict) else info
+                if isinstance(payload, dict):
+                    for key in ("verdict", "score", "categories", "source"):
+                        value = payload.get(key)
+                        if value is not None:
+                            sanitized[key] = value
+            if not sanitized:
+                sanitized["verdict"] = info if not isinstance(info, dict) else info.get("verdict")
+            providers_out[provider] = sanitized
+
+    normalized_items: Dict[str, Dict[str, Any]] = {}
+    for host in sorted(aggregated.keys()):
+        entry = aggregated[host]
+        providers_map: Dict[str, Any] = entry.get("providers", {})
+        urls_list = sorted(entry.get("urls", set()))
+        normalized_items[host] = {
+            "providers": {prov: providers_map[prov] for prov in sorted(providers_map.keys())},
+            "urls": urls_list,
+            "last": entry.get("last", now_iso),
+        }
+
+    payload = {
+        "schema": "webcarto.reputation#1",
+        "generated_at": now_iso,
+        "meta": meta or {},
+        "metrics": metrics or {},
+        "items": normalized_items,
     }
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

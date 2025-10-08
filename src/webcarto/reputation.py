@@ -9,6 +9,10 @@ import os
 import requests
 
 
+DEFAULT_CACHE_PATH = "out/reputation-cache.json"
+LEGACY_CACHE_PATH = "out/reputation.json"
+
+
 def _now_ts() -> float:
     return time.time()
 
@@ -90,7 +94,11 @@ class ReputationClient:
         verbose: bool = False,
     ) -> None:
         self.verbose = verbose
-        self.cache_path = cache_path or "out/reputation.json"
+        default_cache = cache_path or DEFAULT_CACHE_PATH
+        legacy_fallback = None
+        if cache_path is None and not os.path.exists(default_cache) and os.path.exists(LEGACY_CACHE_PATH):
+            legacy_fallback = LEGACY_CACHE_PATH
+        self.cache_path = default_cache
         self.ttl = int(max(0, ttl_seconds))
         self.include_query = bool(include_query)
         self.scrub_params = list(scrub_params or ["gclid", "fbclid", "trk", "ref", "src"])  # utm_* é tratado no scrub
@@ -107,7 +115,16 @@ class ReputationClient:
         if keys:
             self.env_keys.update({k.lower(): v for k, v in keys.items()})
         self.providers = self._resolve_providers(providers)
-        self.cache = self._load_cache(self.cache_path)
+        cache_source = legacy_fallback or self.cache_path
+        self.cache = self._load_cache(cache_source)
+        if legacy_fallback and legacy_fallback != self.cache_path:
+            # migrate silently to the new cache path
+            try:
+                os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+                with open(self.cache_path, "w", encoding="utf-8") as f:
+                    json.dump(self.cache, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
 
     def _log(self, msg: str) -> None:
         if self.verbose:
