@@ -236,11 +236,15 @@ def run(argv: Optional[Iterable[str]] = None) -> int:
         urls_payload = _load_json(args.urls, parser, label="URLs")
         if not urls_payload:
             parser.error("Nenhum URLs JSON encontrado e nenhuma --url fornecida")
-        pages = _extract_pages(urls_payload)
-        if args.limit:
-            pages = pages[: args.limit]
-        targets = pages
         source = (urls_payload.get("meta") or {}).get("source")
+        if source:
+            targets = [source]
+        else:
+            pages = _extract_pages(urls_payload)
+            if args.limit:
+                pages = pages[: args.limit]
+            targets = pages
+            source = pages[0] if pages else None
 
     reputation_cache = _load_json(args.reputation)
 
